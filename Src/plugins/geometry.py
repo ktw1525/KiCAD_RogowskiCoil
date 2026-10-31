@@ -15,7 +15,7 @@ DEFAULTS = dict(cx=100.0,cy=100.0,turns=32,hole=3.0,
                 ri1=2.235,ri2=2.90185,ro1=4.880,ro2=5.265,
                 width=0.100, via=0.450, drill=0.200, rotation=0.0,
                 clearance=0.10, outline=False, board_margin=0.9,
-                bend_radius=0.385)
+                bend_radius=0.385,net_a='ROGOWSKI_A',net_b='ROGOWSKI_B')
 
 def source_model():
     with open(os.path.join(os.path.dirname(__file__), 'coil_model.json'),
@@ -94,10 +94,108 @@ def _circle_points(center,radius,start,sweep):
              center[1]+radius*math.sin(start+sweep*i/steps)) for i in range(steps+1)]
 
 
+def _arc_record(points,meta):
+    """Keep one circular primitive, with samples used only by geometry checks."""
+    if 'bend_center' in meta:
+        arc=(meta['bend_center'],meta['bend_radius'],meta['bend_start'],meta['bend_sweep'])
+    else:
+        # Radius/angular edits can warp source samples. Define a real circle
+        # through the transformed endpoints and midpoint instead of exporting
+        # that warped polyline as hundreds of tiny tracks.
+        arc=_fit_arc([points[0],points[len(points)//2],points[-1]])
+    if arc is None: raise ValueError('원호의 세 점이 일직선입니다. 코일 치수를 확인하세요.')
+    sampled=_circle_points(*arc)
+    sampled[0]=points[0];sampled[-1]=points[-1]
+    return sampled,dict(meta,arc=arc)
+
+
+def copper_primitives(tracks):
+    """Collapse each sampled circular run into one native start/mid/end arc."""
+    result=[];index=0
+    while index<len(tracks):
+        first=tracks[index];index+=1
+        if 'arc' not in first:
+            result.append(dict(first,kind='line'))
+            continue
+        run=[first]
+        while index<len(tracks):
+            following=tracks[index]
+            if (following.get('arc')!=first['arc'] or following['net']!=first['net'] or
+                    following['layer']!=first['layer'] or math.dist(run[-1]['b'],following['a'])>1e-7): break
+            run.append(following);index+=1
+        center,radius,_,_=first['arc']
+        def angle(q): return math.atan2(q[1]-center[1],q[0]-center[0])
+        start=angle(first['a'])
+        sweep=sum((angle(t['b'])-angle(t['a'])+math.pi)%(2*math.pi)-math.pi for t in run)
+        mid=(center[0]+radius*math.cos(start+sweep/2),center[1]+radius*math.sin(start+sweep/2))
+        result.append(dict(first,kind='arc',b=run[-1]['b'],mid=mid,arc=(center,radius,start,sweep)))
+    return result
+
+
+def _merge_split_arcs(sources):
+    """Restore circular runs split by straight detours in the Gerber model.
+
+    Only cross unbranched straight joins between arcs on the same circle.
+    This restores both the split outer half bend and its outer ring connector
+    before their endpoints move to accommodate the requested bend radius.
+    """
+    sources=list(sources)
+    while True:
+        nodes=[];joins={};ends=[]
+        def node(q):
+            for i,old in enumerate(nodes):
+                if math.dist(q,old)<0.002: return i
+            nodes.append(q)
+            return len(nodes)-1
+        for i,path in enumerate(sources):
+            a,b=node(path[0]),node(path[-1]);ends.append((a,b))
+            joins.setdefault(a,[]).append(i);joins.setdefault(b,[]).append(i)
+        fits=[_fit_arc(path) for path in sources]
+        merged=False
+        for i,fit in enumerate(fits):
+            if fit is None: continue
+            for reverse in (False,True):
+                current=ends[i][0 if reverse else 1]
+                previous=i;bridges=[];visited={i}
+                while len(joins[current])==2:
+                    j=next(k for k in joins[current] if k!=previous)
+                    if j in visited: break
+                    visited.add(j)
+                    backwards=ends[j][1]==current
+                    other=ends[j][0 if backwards else 1]
+                    candidate=fits[j]
+                    if candidate is not None:
+                        if not bridges: break
+                        center,radius,start,sweep=fit
+                        direction=-sweep if reverse else sweep
+                        next_sweep=-candidate[3] if backwards else candidate[3]
+                        if (math.dist(center,candidate[0])>0.003 or
+                                abs(radius-candidate[1])>0.003 or direction*next_sweep<=0): break
+                        first=sources[i][-1 if reverse else 0]
+                        last=sources[j][0 if backwards else -1]
+                        start=math.atan2(first[1]-center[1],first[0]-center[0])
+                        end=math.atan2(last[1]-center[1],last[0]-center[0])
+                        sign=1 if direction>0 else -1
+                        span=sign*((end-start)*sign%(2*math.pi))
+                        if abs(span)<abs(direction)+abs(next_sweep)-0.001: break
+                        points=_circle_points(center,radius,start,span)
+                        points[0]=first;points[-1]=last
+                        removed={i,j,*bridges}
+                        sources=[path for k,path in enumerate(sources) if k not in removed]+[points]
+                        merged=True
+                        break
+                    if len(sources[j])!=2: break
+                    bridges.append(j);previous=j;current=other
+                if merged: break
+            if merged: break
+        if not merged: return sources
+
+
 def _component_paths(component,model,p,mapper,via_mapper,sources=None):
     """Move shared endpoints together; all small 90/180 bends use one radius."""
     sources=component['paths'] if sources is None else sources
     sources=[[tuple(q) for q in path] for path in sources]
+    if p['bend_radius']>0: sources=_merge_split_arcs(sources)
     # Some extracted arcs run past a junction lying inside the sampled arc.
     # Trim that overrun first, so the adjacent path shares the movable endpoint.
     if p['bend_radius']>0:
@@ -132,6 +230,7 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
         entries.append((source,joint(source[0]),joint(source[-1]),_fit_arc(source)))
     bends={};moved=set()
     orthogonal_inner=(component['net']=='B' and component['layer']=='B' and component['ports']==['I14'])
+    red_inlet=(component['net']=='A' and component['layer']=='F' and set(component['ports'])=={'L17','I16'})
     inner_half=None
     requested=p['bend_radius']
     if requested>0:
@@ -152,11 +251,18 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
             angle=direction+relative
             special=orthogonal_inner and abs(span)==math.pi
             if special:
-                angle=math.radians(p['rotation'])-math.pi/2
+                # Use the winding's radial frame at the shared via. The red
+                # quarter must end on the same radial line as the blue spoke.
+                angle=direction-3*math.pi/2
                 span=math.pi
+            shared_quarter=(component['net']=='A' and component['layer']=='F' and
+                            abs(span)==math.pi/2 and
+                            math.dist(target,_target_via(p['turns']//2,'I',p['turns'],p))<1e-6)
+            if shared_quarter:
+                angle=direction-(math.pi/2 if span>0 else 0)
             points=_circle_points(target,requested,angle,span)
             bends[index]=(points,dict(bend_center=target,bend_radius=requested,bend_sweep=span,
-                                      bend_start=angle,inner_lead_half=special))
+                                      bend_start=angle,inner_lead_half=special,shared_inner_quarter=shared_quarter))
             for node,q in ((a,points[0]),(b,points[-1])):
                 if node not in moved: positions[node]=q;moved.add(node)
             if special: inner_half=(target,a,b,points[-1])
@@ -172,7 +278,7 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
         if index in bends:
             points,meta=bends[index]
             if math.dist(positions[a],points[0])>1e-8: records.append(([positions[a],points[0]],{}))
-            records.append((points,meta))
+            records.append(_arc_record(points,meta))
             if math.dist(points[-1],positions[b])>1e-8:
                 records.append(([points[-1],positions[b]],
                                 dict(inner_lead_leg='lower') if meta.get('inner_lead_half') else {}))
@@ -180,6 +286,8 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
         points=[mapper(q) for q in source]
         points[0]=positions[a];points[-1]=positions[b]
         record_meta={}
+        if red_inlet and min(math.hypot(*q) for q in source)<5.90:
+            record_meta['red_inner_inlet']=True
         if inner_half is not None and len(source)==2 and b==inner_half[1]:
             angle=math.radians(p['rotation']);horizontal=(math.cos(angle),math.sin(angle))
             dx,dy=points[-1][0]-points[0][0],points[-1][1]-points[0][1]
@@ -187,6 +295,8 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
             corner=(points[0][0]+length*horizontal[0],points[0][1]+length*horizontal[1])
             points=[points[0],corner,points[-1]]
             record_meta['inner_lead_top']=True
+        if inner_half is not None and fit is not None and math.hypot(*fit[0])<0.01 and b==inner_half[2]:
+            record_meta['inner_lead_return']=True
         if requested>0 and fit is not None and math.hypot(*fit[0])<0.01:
             first,last=points[0],points[-1];dx,dy=last[0]-first[0],last[1]-first[1]
             length2=dx*dx+dy*dy
@@ -201,8 +311,50 @@ def _component_paths(component,model,p,mapper,via_mapper,sources=None):
                     raise ValueError('공통 원호 반경이 연결 공간에 비해 큽니다. 반경을 줄이거나 비아 열 간격을 조정하세요.')
                 points=_circle_points(center,math.dist(first,center),start,span)
                 points[0]=first;points[-1]=last
-        records.append((points,record_meta))
+        records.append(_arc_record(points,record_meta) if fit is not None else (points,record_meta))
     return records
+
+
+def _align_inner_guides(tracks,vias,p):
+    """Use identical centreline segments on Top/Bottom beside the inlet arc."""
+    half=[t for t in tracks if t.get('inner_lead_half')]
+    if not half: return tracks
+    top=[t for t in tracks if t.get('inner_lead_top')]
+    center=half[0]['bend_center'];upper=half[0]['a'];lower=half[-1]['b']
+    # Find the existing red guide from this quarter-circle to the next half-circle.
+    def key(q): return (round(q[0],7),round(q[1],7))
+    graph={}
+    for t in tracks:
+        if t['layer']!='F' or t['net']!='A' or t.get('breakout') or 'bend_center' in t: continue
+        for a,b in ((t['a'],t['b']),(t['b'],t['a'])):
+            graph.setdefault(key(a),[]).append((a,b,t))
+    path=[];current=key(lower);previous=None;seen=set()
+    while current not in seen:
+        seen.add(current)
+        choices=[item for item in graph.get(current,()) if key(item[1])!=previous]
+        if not choices: break
+        if len(choices)!=1: raise ValueError('인출부 공통 경로의 연결을 확인할 수 없습니다.')
+        a,b,t=choices[0];path.append((a,b,t));previous,current=current,key(b)
+    endpoint=_target_via(p['turns']//2-2,'I',p['turns'],p)
+    if not path or abs(math.dist(path[-1][1],endpoint)-p['bend_radius'])>1e-5:
+        raise ValueError('인출부의 다음 권선 접속 경로를 확인할 수 없습니다.')
+    result=[t for t in tracks if not (t.get('red_inner_inlet') or t.get('inner_lead_return') or
+                                     t.get('inner_lead_leg')=='lower')]
+    # Red follows precisely the same upper horizontal and vertical segments as blue.
+    for t in top:
+        t['shared_inner_guide']='upper'
+        result.append(dict(a=t['a'],b=t['b'],layer='F',net='A',breakout=True,shared_inner_guide='upper'))
+    result.append(dict(a=upper,b=center,layer='F',net='A',breakout=True))
+    # Blue follows the actual red lower guide, instead of fitting a second curve.
+    for a,b,t in path:
+        t['shared_inner_guide']='lower'
+        copied=dict(a=a,b=b,layer='B',net='B',breakout=True,
+                    inner_lead_return=True,shared_inner_guide='lower')
+        if 'arc' in t: copied['arc']=t['arc']
+        result.append(copied)
+    result.append(dict(a=path[-1][1],b=endpoint,layer='B',net='B',breakout=True,
+                       inner_lead_return=True,inner_lead_terminal=True))
+    return result
 
 
 def _source_edges(model,param):
@@ -219,7 +371,7 @@ def _source_edges(model,param):
                 if math.dist(a,b)>0.000005:
                     tracks.append(dict(a=a,b=b,layer=component['layer'],net=component['net'],breakout=lead,**meta))
     vias=[dict(p=via_point(v),net=v['net'],id=v['id']) for v in model['vias']]
-    return tracks,vias
+    return _align_inner_guides(tracks,vias,param),vias
 
 
 def _sequence_A(n):
@@ -296,7 +448,7 @@ def _variable_edges(model,p,progress=None):
     for v in model['vias']:
         if v['id'].startswith('L'):
             vias.append(dict(p=_breakout_point((v['x'],v['y']),p),net=v['net'],id=v['id']))
-    return tracks,vias
+    return _align_inner_guides(tracks,vias,p),vias
 
 
 def _base_breakout_point(point,p):
@@ -321,7 +473,11 @@ def _breakout_layout(p):
     drop=max(0.3787*scale,(p['via']+p['width'])/2+max(0,p['clearance'])+0.03)
     elbow=(old_elbow[0],coil[1])
     via=(elbow[0],elbow[1]+drop)
-    pad=(old_pad[0],old_pad[1]+via[1]-old_via[1])
+    upper_pad=_base_breakout_point((-6.905,0.1416),local)
+    # Keep a usable gap between square pads even when the winding pitch
+    # moves the lower via upward. Only the free terminal endpoint moves.
+    pitch=_terminal_pad_size(p)+max(0.15,p['clearance'])
+    pad=(old_pad[0],max(old_pad[1]+via[1]-old_via[1],upper_pad[1]+pitch))
     angle=math.radians(p['rotation'])
     def world(q):
         return (p['cx']+q[0]*math.cos(angle)-q[1]*math.sin(angle),
@@ -335,6 +491,53 @@ def _breakout_point(point,p):
                        ((-5.9008,1.2658),'via'),((-6.905,0.9916),'pad')):
         if math.dist(point,source)<0.002: return layout[key]
     return _base_breakout_point(point,p)
+
+
+def _terminal_pad_size(p):
+    return max(0.7*p['ro2']/REF_RADII[-1],p['width']+0.2)
+
+
+def breakout_pads(p):
+    """Two aligned front/back SMD terminal pairs; no drill or layer bridge."""
+    size=_terminal_pad_size(p)
+    pads=[]
+    for index,(net,source) in enumerate((('A',(-6.905,0.1416)),('B',(-6.905,0.9916)))):
+        for layer in ('F','B'):
+            pads.append(dict(p=_breakout_point(source,p),size=size,rotation=p['rotation'],
+                             net=net,layer=layer,number=str(index+1+(2 if layer=='B' else 0))))
+    return pads
+
+
+def terminal_bridges(p):
+    pads={pad['number']:pad for pad in breakout_pads(p)}
+    return [dict(a=pads['3']['p'],b=pads['4']['p'],layer='B',width=p['width'],
+                 net_tie=('3','4'))]
+
+
+def check_terminal_bridges(tracks,vias,p):
+    """Only the intended pad-end joins may touch the bottom copper bridge."""
+    for bridge in terminal_bridges(p):
+        for t in tracks:
+            if t['layer']!=bridge['layer']: continue
+            if any(math.dist(t[end],bridge[q])<1e-7 for end in ('a','b') for q in ('a','b')): continue
+            if _segments_distance(t['a'],t['b'],bridge['a'],bridge['b'])<p['width']-0.001:
+                raise ValueError('바텀 3·4 연결 배선이 인출부의 다른 배선과 겹칩니다. 치수를 조정하세요.')
+        for via in vias:
+            if _point_to_segment(via['p'],bridge['a'],bridge['b'])<(p['width']+p['via'])/2-0.001:
+                raise ValueError('바텀 3·4 연결 배선이 비아와 겹칩니다. 치수를 조정하세요.')
+
+
+def pad_corners(pad):
+    angle=math.radians(pad['rotation']);c=math.cos(angle);s=math.sin(angle)
+    h=pad['size']/2;x,y=pad['p']
+    return [(x+u*c-v*s,y+u*s+v*c) for u,v in ((-h,-h),(h,-h),(h,h),(-h,h))]
+
+
+def copper_radius(tracks,vias,p,pads):
+    center=(p['cx'],p['cy'])
+    return max([math.dist(center,v['p'])+p['via']/2 for v in vias]+
+               [math.dist(center,t[end])+p['width']/2 for t in tracks for end in ('a','b')]+
+               [math.dist(center,q) for pad in pads for q in pad_corners(pad)])
 
 
 def _mapped_breakout_paths(component,model,p):
@@ -397,6 +600,10 @@ def parameter_limits(p):
     return result
 
 def validate(p):
+    for key in ('net_a','net_b'):
+        name=p.get(key,DEFAULTS[key])
+        if not isinstance(name,str) or not name.strip() or any(c in name for c in '\r\n\x00'):
+            raise ValueError('패드 1·2에 연결할 네트 이름을 입력하거나 선택하세요.')
     if not math.isfinite(p.get('bend_radius',0.385)) or p.get('bend_radius',0.385)<0:
         raise ValueError('굴곡 원호 반경은 0 이상의 유한한 값이어야 합니다.')
     n=p['turns']
@@ -442,8 +649,10 @@ def build(p, progress=None):
     report(6, '권선 트랙 및 비아 좌표 계산 중')
     if q['turns']==32:tracks,vias=_source_edges(model,q)
     else:tracks,vias=_variable_edges(model,q,lambda message: report(8,message))
+    pads=breakout_pads(q)
+    check_terminal_bridges(tracks,vias,q)
     min_gap=check_shorts(tracks,vias,q['width'],q['via'],
-                         lambda value, message: report(10+value*0.44, message))
+                         lambda value, message: report(10+value*0.44, message),pads=pads)
     seqA=_sequence_A(q['turns']);seqB=_sequence_B(q['turns']);n=q['turns']
     terminals=({'A_IN':_target_via(seqA[0],'I',n,q), 'A_OUT':_target_via(seqA[-1],'O',n,q),
                 'B_IN':_target_via(seqB[0],'O',n,q), 'B_OUT':_target_via(seqB[-1],'I',n,q)})
@@ -454,7 +663,9 @@ def build(p, progress=None):
         vdict={v['id']:v['p'] for v in vias}
         terminals['A_IN']=vdict['L17'];terminals['B_IN']=vdict['L16']
     report(55, '권선 모델 생성 완료')
-    return {'tracks':tracks,'vias':vias,'terminals':terminals,'settings':q,
+    return {'tracks':tracks,'primitives':copper_primitives(tracks),'vias':vias,'pads':pads,
+            'bridges':terminal_bridges(q),
+            'terminals':terminals,'settings':q,
             'mode':('source-exact' if q['bend_radius']==0 else 'circular-bends') if n==32 else 'parametric',
             'counts':{'A':n//2,'B':n//2}, 'min_cross_net_gap_mm':min_gap}
 
@@ -486,7 +697,19 @@ def _shape_distance(a,b):
     else:dst=_segments_distance(p1,p2,q1,q2)
     return dst-ar-br
 
-def check_shorts(tracks,vias,track_width,via_diameter,progress=None):
+def _pad_shape_distance(pad,shape):
+    # A square is a conservative envelope for the slightly rounded SMD pad.
+    angle=math.radians(pad['rotation']);c=math.cos(angle);s=math.sin(angle)
+    def local(q):
+        x,y=q[0]-pad['p'][0],q[1]-pad['p'][1]
+        return (x*c+y*s,-x*s+y*c)
+    a,b=local(shape[0]),local(shape[1]);h=pad['size']/2
+    if any(abs(q[0])<=h and abs(q[1])<=h for q in (a,b)): return -shape[2]
+    corners=[(-h,-h),(h,-h),(h,h),(-h,h)]
+    return min(_segments_distance(a,b,u,v) for u,v in zip(corners,corners[1:]+corners[:1]))-shape[2]
+
+
+def check_shorts(tracks,vias,track_width,via_diameter,progress=None,pads=()):
     shapes=[]
     for t in tracks:
         shapes.append((t['a'],t['b'],track_width/2,t['net'],t['layer']))
@@ -520,5 +743,17 @@ def check_shorts(tracks,vias,track_width,via_diameter,progress=None):
             min_clearance=min(min_clearance,dist)
             if dist < -0.001:
                 raise ValueError('서로 다른 두 코일의 동박이 %.4fmm 겹칩니다. 치수/턴 수를 조정하세요.'%(-dist))
-    if progress is not None: progress(100, '두 권선 간섭 검사 완료')
+    for i,pad in enumerate(pads):
+        for shape in shapes:
+            if shape[3]==pad['net'] or shape[4]!=pad['layer']: continue
+            gap=_pad_shape_distance(pad,shape)
+            min_clearance=min(min_clearance,gap)
+            if gap < -0.001: raise ValueError('인출 패드와 다른 권선의 동박이 겹칩니다. 치수를 조정하세요.')
+        for other in pads[i+1:]:
+            if other['net']==pad['net'] or other['layer']!=pad['layer']: continue
+            corners=pad_corners(other)
+            gap=min(_pad_shape_distance(pad,(a,b,0)) for a,b in zip(corners,corners[1:]+corners[:1]))
+            min_clearance=min(min_clearance,gap)
+            if gap<0.001: raise ValueError('두 인출 패드가 겹치거나 맞닿습니다. 치수를 조정하세요.')
+    if progress is not None: progress(100, '두 권선 및 인출 패드 간섭 검사 완료')
     return min_clearance

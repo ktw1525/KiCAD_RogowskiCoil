@@ -33,7 +33,7 @@ VALUES = [
 
 class Parameters(wx.Dialog):
     def __init__(self, parent, copper_layers, board=None):
-        super().__init__(parent, title='Rogowski TI Gerber Coil Generator v0.5.6',
+        super().__init__(parent, title='Rogowski TI Gerber Coil Generator v0.6.1',
                          size=(1180,800), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.board=board
         self.validated_values=None
@@ -41,7 +41,7 @@ class Parameters(wx.Dialog):
         self.validating=False
         self.SetMinSize((1080,500))
         root=wx.BoxSizer(wx.VERTICAL)
-        heading=wx.StaticText(self,label='TI TIDA-010971 · 원본 2개 독립 권선 · 4열 교차 비아')
+        heading=wx.StaticText(self,label='TI TIDA-010971 · 2개 권선 · 바텀 패드 3–4 연결 · 4열 교차 비아')
         root.Add(heading,0,wx.ALL,12)
         note=wx.StaticText(self,label='기본 Top/Bottom 연결 유지  |  아래 인출 비아·꼭짓점은 권선 높이에 자동 연동')
         note.Wrap(550)
@@ -64,6 +64,18 @@ class Parameters(wx.Dialog):
             limit.SetMinSize((230,36))
             self.limit_labels[key]=limit
             fg.Add(limit,0,wx.ALIGN_CENTER_VERTICAL)
+        net_grid=wx.FlexGridSizer(cols=2,vgap=7,hgap=12)
+        self.net_entries={}
+        choices=sorted(str(name) for name in board.GetNetsByName() if str(name)) if board is not None else []
+        for key,title in (('net_a','탑 패드 1 연결 네트'),('net_b','탑 패드 2 연결 네트')):
+            net_grid.Add(wx.StaticText(scroll,label=title),0,wx.ALIGN_CENTER_VERTICAL)
+            entry=wx.ComboBox(scroll,value=geometry.DEFAULTS[key],choices=choices,style=wx.CB_DROPDOWN)
+            entry.SetMinSize((320,-1))
+            self.net_entries[key]=entry
+            net_grid.Add(entry,0,wx.EXPAND)
+        contents.Add(net_grid,0,wx.ALL,14)
+        contents.Add(wx.StaticText(scroll,label='기존 네트 선택 또는 새 이름 입력 · 1/3번은 같은 네트, 2/4번은 같은 네트\n바텀 3–4는 네트타이 구리 배선으로 연결됩니다.'),
+                     0,wx.LEFT|wx.RIGHT|wx.BOTTOM,14)
         contents.Add(fg,0,wx.ALL|wx.EXPAND,14)
         contents.Add(wx.StaticText(scroll,label='오른쪽 범위는 현재 입력값 기준 · 길이 mm / 각도 °\n표시 범위 안에서도 생성 시 배선 간섭으로 제한될 수 있습니다.'),
                      0,wx.LEFT|wx.RIGHT|wx.BOTTOM,14)
@@ -73,9 +85,9 @@ class Parameters(wx.Dialog):
         self.outline=wx.CheckBox(scroll,label='독립 시험 PCB 원형 외곽선 생성 (Edge.Cuts)')
         contents.Add(self.outline,0,wx.LEFT|wx.RIGHT|wx.BOTTOM,14)
         txt=wx.StaticText(scroll,label=('현재 PCB: %d층 구리 / 생성 배선: F.Cu 및 B.Cu만 사용\n'
-                                        '원본 32: 좌측 두 권선의 인출 형상 포함, 패드는 직접 연결\n'
-                                        '가변 N: 기본 인출부 형상 유지, 인출부 비아 2개 포함\n'
-                                        '※ 2개 권선은 서로 다른 네트이며, 외부 차폐 및 보상 리턴은 미구현\n'
+                                        '원본 32: 좌측 인출부 및 앞·뒤 정렬 사각 패드 포함\n'
+                                        '가변 N: 기본 인출부·비아 2개·앞뒤 패드 4개 포함\n'
+                                        '※ 바텀 3–4 연결부에서 두 권선이 이어집니다. 외부 차폐 및 보상 리턴은 미구현\n'
                                         '※ 원본의 가는 트랙/간격은 제조사 DRC 요구와 다를 수 있음')%copper_layers)
         contents.Add(txt,0,wx.LEFT|wx.RIGHT|wx.BOTTOM,14)
         scroll.SetSizer(contents)
@@ -87,7 +99,10 @@ class Parameters(wx.Dialog):
         preview_layout.Add(wx.StaticText(preview_panel,label='코일 미리보기'),0,wx.ALL,10)
         self.preview=CoilPreview(preview_panel)
         preview_layout.Add(self.preview,1,wx.EXPAND|wx.LEFT|wx.RIGHT,10)
-        legend=wx.StaticText(preview_panel,label='빨강: F.Cu  /  파랑: B.Cu  /  노랑: 비아\n자동 확대 · 위에서 본 모습 · DRC 검사 전')
+        reset_view=wx.Button(preview_panel,label='전체 보기')
+        reset_view.Bind(wx.EVT_BUTTON,self.preview.reset_view)
+        preview_layout.Add(reset_view,0,wx.TOP|wx.LEFT,10)
+        legend=wx.StaticText(preview_panel,label='빨강: F.Cu  /  파랑: B.Cu  /  노랑: 비아\n휠: 확대·축소 / 왼쪽 드래그: 이동\n더블 클릭: 전체 보기 · 위에서 본 모습 · DRC 검사 전')
         preview_layout.Add(legend,0,wx.ALL,10)
         self.focus_help=wx.StaticText(preview_panel,label='입력칸을 선택하면 해당 부분을 노란색으로 강조합니다.',
                                      style=wx.ST_NO_AUTORESIZE)
@@ -128,6 +143,9 @@ class Parameters(wx.Dialog):
             entry.Bind(wx.EVT_KILL_FOCUS,self.blur_parameter)
         self.center_hole.Bind(wx.EVT_CHECKBOX,self.schedule_preview)
         self.outline.Bind(wx.EVT_CHECKBOX,self.schedule_preview)
+        for entry in self.net_entries.values():
+            entry.Bind(wx.EVT_TEXT,self.schedule_preview)
+            entry.Bind(wx.EVT_COMBOBOX,self.schedule_preview)
         self.Bind(wx.EVT_WINDOW_DESTROY,self.on_destroy)
         self.validate_button.Bind(wx.EVT_BUTTON,self.validate_parameters)
         self.generate_button.Bind(wx.EVT_BUTTON,self.on_generate)
@@ -184,7 +202,7 @@ class Parameters(wx.Dialog):
             self.validated_geometry=g
             self.set_validation_status(
                 '검증 통과 · 배선 %d개 / 비아 %d개 · %s · 생성할 수 있습니다. (KiCad DRC는 별도 확인)'%
-                (len(g['tracks']),len(g['vias']),
+                (len(g['primitives']),len(g['vias']),
                  '공통 반경 %.4g mm'%p['bend_radius'] if p['bend_radius']>0 else '원본 원호 방식'),success=True)
         except Exception as exc:
             self.validated_values=None
@@ -259,6 +277,10 @@ class Parameters(wx.Dialog):
             p[key]=int(raw) if key=='turns' else float(raw)
         p['outline']=bool(self.outline.GetValue())
         p['center_hole']=bool(self.center_hole.GetValue())
+        for key,entry in self.net_entries.items():
+            p[key]=entry.GetValue().strip()
+            if not p[key] or any(c in p[key] for c in '\r\n\x00'):
+                raise ValueError('패드 1·2에 연결할 네트 이름을 입력하거나 선택하세요.')
         if not all(math.isfinite(float(v)) for k,v in p.items() if isinstance(v,(int,float))):
             raise ValueError('숫자 필드에 무한대 또는 NaN 값이 포함되어 있습니다.')
         return p
@@ -280,22 +302,73 @@ def get_net(board,name):
     return net
 
 
+def terminal_footprint(board,pads,nets,bridges,reference=None):
+    footprint=pcbnew.FOOTPRINT(board)
+    references={f.GetReference() for f in board.GetFootprints()}
+    number=1
+    while 'RC%d'%number in references or 'RC%dB'%number in references: number+=1
+    footprint.SetReference(reference or 'RC%d'%number)
+    footprint.SetValue('Rogowski bottom link' if bridges else 'Rogowski terminals')
+    footprint.SetLayer(pcbnew.B_Cu if pads[0]['layer']=='B' else pcbnew.F_Cu)
+    footprint.Reference().SetVisible(False);footprint.Value().SetVisible(False)
+    footprint.SetAttributes(pcbnew.FP_SMD|pcbnew.FP_BOARD_ONLY|
+                            pcbnew.FP_EXCLUDE_FROM_BOM|pcbnew.FP_EXCLUDE_FROM_POS_FILES)
+    footprint.SetPosition(vec(pads[0]['p']))
+    for pad in pads:
+        obj=pcbnew.PAD(footprint)
+        obj.SetNumber(pad['number'])
+        obj.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        obj.SetShape(pcbnew.PAD_SHAPE_ROUNDRECT)
+        obj.SetRoundRectRadiusRatio(0.1)
+        obj.SetSize(vec((pad['size'],pad['size'])))
+        layers=pcbnew.LSET()
+        layers.AddLayer(pcbnew.F_Cu if pad['layer']=='F' else pcbnew.B_Cu)
+        layers.AddLayer(pcbnew.F_Mask if pad['layer']=='F' else pcbnew.B_Mask)
+        obj.SetLayerSet(layers)
+        obj.SetPosition(vec(pad['p']))
+        # KiCad pad angles use the opposite sign to model coordinates (Y down).
+        obj.SetOrientationDegrees(-pad['rotation'])
+        obj.SetNet(nets[pad['net']])
+        footprint.Add(obj)
+    if bridges: footprint.AddNetTiePadGroup('3,4')
+    for bridge in bridges:
+        copper=pcbnew.PCB_SHAPE(footprint)
+        copper.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        copper.SetStart(vec(bridge['a']));copper.SetEnd(vec(bridge['b']))
+        copper.SetWidth(mm(bridge['width']))
+        copper.SetLayer(pcbnew.B_Cu)
+        footprint.Add(copper)
+    return footprint
+
+
+def focus_generated_coil(identifier):
+    """Run after the plugin/dialog closes and KiCad rebuilds its canvas."""
+    board=pcbnew.GetBoard()
+    if board is None: return
+    item=board.ResolveItem(pcbnew.KIID(identifier),True)
+    if item is None: return
+    pcbnew.Refresh()
+    pcbnew.FocusOnItem(item,pcbnew.F_Cu)
+    pcbnew.FocusOnItem(None)  # Leave the normal copper colours visible.
+
+
 def apply_geometry(board,g,progress=None):
     def report(value, message):
         if progress is not None: progress(value, message)
     report(55, 'PCB 네트 준비 중')
     p=g['settings']
-    nets={'A':get_net(board,'ROGOWSKI_A'),
-          'B':get_net(board,'ROGOWSKI_B')}
+    nets={'A':get_net(board,p['net_a']),
+          'B':get_net(board,p['net_b'])}
     items=[]
     # Create all board objects in memory first. Add only after construction.
-    for index,t in enumerate(g['tracks']):
+    for index,t in enumerate(g['primitives']):
         if index%64==0:
-            report(56+20*index/max(1,len(g['tracks'])),
-                   'PCB 트랙 준비 중 (%d/%d)'%(index,len(g['tracks'])))
-        line=pcbnew.PCB_TRACK(board)
+            report(56+20*index/max(1,len(g['primitives'])),
+                   'PCB 직선·원호 준비 중 (%d/%d)'%(index,len(g['primitives'])))
+        line=pcbnew.PCB_ARC(board) if t['kind']=='arc' else pcbnew.PCB_TRACK(board)
         line.SetStart(vec(t['a']))
         line.SetEnd(vec(t['b']))
+        if t['kind']=='arc': line.SetMid(vec(t['mid']))
         line.SetWidth(mm(p['width']))
         line.SetLayer(pcbnew.F_Cu if t['layer']=='F' else pcbnew.B_Cu)
         line.SetNet(nets[t['net']])
@@ -311,15 +384,19 @@ def apply_geometry(board,g,progress=None):
         obj.SetLayerPair(pcbnew.F_Cu,pcbnew.B_Cu)
         obj.SetNet(nets[v['net']])
         items.append(obj)
+    # Keep the bottom net tie separate: KiCad's net-tie cache can otherwise
+    # associate its copper with the front pads at the identical XY positions.
+    front=terminal_footprint(board,[pad for pad in g['pads'] if pad['layer']=='F'],nets,[])
+    back=terminal_footprint(board,[pad for pad in g['pads'] if pad['layer']=='B'],nets,
+                            g['bridges'],front.GetReference()+'B')
+    items.extend((front,back))
     if p['outline'] or p['center_hole']:
         report(80, '중앙 홀 및 외곽선 준비 중')
         # Outline must encompass left breakout in reference mode.
         c=(p['cx'],p['cy'])
         circle_radii=[]
         if p['outline']:
-            radius=max([math.dist(c,v['p'])+p['via']/2 for v in g['vias']]+[
-                       math.dist(c,t[end])+p['width']/2
-                       for t in g['tracks'] for end in ('a','b')]) +p['board_margin']
+            radius=geometry.copper_radius(g['tracks'],g['vias'],p,g['pads'])+p['board_margin']
             circle_radii.append(radius)
         if p['center_hole']:circle_radii.append(p['hole']/2)
         for radius1 in circle_radii:
@@ -330,6 +407,10 @@ def apply_geometry(board,g,progress=None):
             sh.SetLayer(pcbnew.Edge_Cuts)
             sh.SetWidth(mm(0.05))
             items.append(sh)
+    group=pcbnew.PCB_GROUP(board)
+    group.SetName('Rogowski Coil')
+    for item in items: group.AddItem(item)
+    items.append(group)
     inserted=[]
     try:
         for index,item in enumerate(items):
@@ -343,6 +424,7 @@ def apply_geometry(board,g,progress=None):
             try: board.Remove(item)
             except Exception: pass
         raise
+    g['focus_uuid']=group.m_Uuid.AsString()
     return len(items)
 
 
@@ -364,6 +446,7 @@ class RogowskiAction(pcbnew.ActionPlugin):
             return
         dlg=Parameters(None,board.GetCopperLayerCount(),board)
         progress_dialog=None
+        focus_uuid=None
         try:
             if dlg.ShowModal()!=wx.ID_OK:return
             dlg.preview_timer.Stop()
@@ -386,15 +469,19 @@ class RogowskiAction(pcbnew.ActionPlugin):
             progress(100,'코일 생성 완료')
             progress_dialog.Destroy()
             progress_dialog=None
+            focus_uuid=g['focus_uuid']
             label={'source-exact':'원본 Gerber 좌표 복원',
                    'circular-bends':'원형 굴곡 패턴 생성',
                    'parametric':'가변 권선 재배열'}[g['mode']]
             wx.MessageBox(
-                '%s 완료\n배선: %d개 / 비아: %d개 / 네트: 2개\n'
+                '%s 완료\n직선·원호: %d개 / 비아: %d개 / 패드: 4개 / 네트: %d개\n'
                 'F.Cu + B.Cu에서 생성했습니다.\n\n'
+                '패드 1: %s / 패드 2: %s\n바텀 3–4 구리 배선 연결 완료\n'
+                '확인을 누르면 생성한 코일 위치로 이동합니다.\n'
                 '제작 전 DRC 및 두 권선의 연결성/절연을 확인하세요.\n'
                 '원본은 매우 가는 트랙을 포함하므로 제조 가능 여부를 확인하세요.'%
-                (label,len(g['tracks']),len(g['vias'])),
+                (label,len(g['primitives']),len(g['vias']),len({g['settings']['net_a'],g['settings']['net_b']}),
+                 g['settings']['net_a'],g['settings']['net_b']),
                 'Rogowski',wx.OK|wx.ICON_INFORMATION)
         except Exception as exc:
             if progress_dialog is not None:
@@ -406,3 +493,4 @@ class RogowskiAction(pcbnew.ActionPlugin):
         finally:
             if progress_dialog is not None: progress_dialog.Destroy()
             dlg.Destroy()
+            if focus_uuid is not None: wx.CallAfter(focus_generated_coil,focus_uuid)

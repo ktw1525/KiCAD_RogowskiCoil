@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v2",
   "name": "Rogowski TI Gerber Coil Generator",
-  "description": "Two independent windings recreated from TI TIDA010971E2.0 copper and NC drill geometry.",
-  "description_full": "KiCad 10 dual-winding PCB Rogowski coil using TI reference Top/Bottom trace templates. The 32-position mode has 66 vias; variable counts (12 to 96 multiples of 4, excluding 32) have 2N+2 vias. The lower breakout via and tip follow the adjacent winding connection height, with a vertical via leg and horizontal coil connection. Upper breakout anchors and layer connectivity are preserved. Small half-circle and quarter-circle bends use one configurable common radius (default 0.385 mm), with exact 180/90 degree sweeps and shared connection endpoints adjusted together; infeasible radii are rejected. Reference breakout angular space is retained. Successful dimension and copper-overlap validation is required before generation. Live preview and parameter highlighting are supported. See README for limitations.",
+  "description": "TI Gerber-derived dual-winding Rogowski coil with selectable terminal nets and a bottom series link.",
+  "description_full": "KiCad 10 dual-winding PCB Rogowski coil using TI reference Top/Bottom trace templates. The 32-position mode has 66 vias; variable counts have 2N+2 vias. Curves are native PCB_ARC tracks, including common-radius 180/90 degree bends. Four SMD pads form aligned front/back pairs. Choose existing PCB nets or enter new names for front pads 1 and 2; those nets also apply to their windings and bottom pads 3 and 4 respectively. Bottom pads 3 and 4 are joined by a copper segment in a dedicated net-tie footprint. Generated items are grouped and the PCB editor focuses on the coil after completion. Dimension and copper-overlap validation is required before generation. Live preview supports wheel zoom, left-button pan and parameter highlighting. See README for limitations.",
   "identifier": "org-ktw1525-rogowski-coil-generator",
   "type": "plugin",
   "author": {
@@ -14,7 +14,7 @@
   "license": "MIT",
   "versions": [
     {
-      "version": "0.5.6",
+      "version": "0.6.1",
       "status": "testing",
       "kicad_version": "10.0",
       "runtime": "swig",

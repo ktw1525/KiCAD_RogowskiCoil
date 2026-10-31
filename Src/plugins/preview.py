@@ -51,10 +51,7 @@ def make_scene(settings, model):
         tracks,vias=geometry._source_edges(model,settings)
     else:
         tracks,vias=geometry._variable_edges(model,settings)
-    center=(settings['cx'],settings['cy'])
-    radius=max([math.dist(center,v['p'])+settings['via']/2 for v in vias]+[
-        math.dist(center,t[end])+settings['width']/2
-        for t in tracks for end in ('a','b')])
+    radius=geometry.copper_radius(tracks,vias,settings,geometry.breakout_pads(settings))
     if settings['outline']: radius+=settings['board_margin']
     return tracks,vias,radius
 
@@ -65,11 +62,83 @@ class CoilPreview(wx.Panel):
         self.SetMinSize((300,300))
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.scene=None
+        self.primitives=[]
+        self.pads=[]
+        self.bridges=[]
         self.settings=None
         self.active_key=None
+        self.zoom=1.0
+        self.pan=(0.0,0.0)
+        self.drag_position=None
         self.model=geometry.source_model()
         self.Bind(wx.EVT_PAINT,self.on_paint)
         self.Bind(wx.EVT_SIZE,self.on_size)
+        self.Bind(wx.EVT_MOUSEWHEEL,self.on_wheel)
+        self.Bind(wx.EVT_LEFT_DOWN,self.on_left_down)
+        self.Bind(wx.EVT_LEFT_UP,self.on_left_up)
+        self.Bind(wx.EVT_MOTION,self.on_motion)
+        self.Bind(wx.EVT_MOUSE_CAPTURE_LOST,self.on_capture_lost)
+        self.Bind(wx.EVT_LEFT_DCLICK,self.reset_view)
+        self.SetToolTip('휠: 확대·축소 / 왼쪽 드래그: 이동 / 더블 클릭: 전체 보기')
+
+    def view_transform(self):
+        width,height=self.GetClientSize()
+        top=90 if self.active_key in ('width','via','drill','clearance','bend_radius') else 0
+        extent=self.scene[2]
+        if self.active_key=='board_margin' and not self.settings['outline']:
+            extent+=self.settings['board_margin']
+        scale=max(1,min(width,height-top)-32)/(2*extent)*self.zoom
+        return scale,(width/2+self.pan[0],(height+top)/2+self.pan[1]),extent
+
+    def reset_view(self,event=None):
+        self.end_drag()
+        self.zoom=1.0
+        self.pan=(0.0,0.0)
+        self.Refresh()
+
+    def on_wheel(self,event):
+        if self.scene is None or event.GetWheelAxis()!=wx.MOUSE_WHEEL_VERTICAL:
+            event.Skip()
+            return
+        old_zoom=self.zoom
+        self.zoom=max(0.25,min(64.0,old_zoom*1.2**(event.GetWheelRotation()/event.GetWheelDelta())))
+        factor=self.zoom/old_zoom
+        # Keep the model point under the cursor stationary while zooming.
+        _,origin,_=self.view_transform()
+        x,y=event.GetPosition()
+        self.pan=(self.pan[0]+(x-origin[0])*(1-factor),
+                  self.pan[1]+(y-origin[1])*(1-factor))
+        self.Refresh()
+
+    def on_left_down(self,event):
+        if self.scene is None: return
+        self.drag_position=tuple(event.GetPosition())
+        if not self.HasCapture(): self.CaptureMouse()
+        self.SetCursor(wx.Cursor(wx.CURSOR_SIZING))
+
+    def end_drag(self):
+        self.drag_position=None
+        if self.HasCapture(): self.ReleaseMouse()
+        self.SetCursor(wx.NullCursor)
+
+    def on_left_up(self,event):
+        self.end_drag()
+
+    def on_capture_lost(self,event):
+        self.drag_position=None
+        self.SetCursor(wx.NullCursor)
+
+    def on_motion(self,event):
+        if self.drag_position is None:
+            event.Skip()
+            return
+        if not event.LeftIsDown():
+            self.end_drag()
+            return
+        x,y=event.GetPosition()
+        self.pan=(self.pan[0]+x-self.drag_position[0],self.pan[1]+y-self.drag_position[1])
+        self.drag_position=(x,y)
+        self.Refresh()
 
     def on_size(self,event):
         self.Refresh()
@@ -81,8 +150,12 @@ class CoilPreview(wx.Panel):
         self.Refresh()
         self.scene=make_scene(settings,self.model)
         self.settings=dict(settings)
+        self.primitives=geometry.copper_primitives(self.scene[0])
+        self.pads=geometry.breakout_pads(settings)
+        self.bridges=geometry.terminal_bridges(settings)
 
     def clear(self):
+        self.end_drag()
         self.scene=None
         self.Refresh()
 
@@ -109,14 +182,11 @@ class CoilPreview(wx.Panel):
         p=self.settings
         key=self.active_key
         detail=key in ('width','via','drill','clearance','bend_radius')
-        top=90 if detail else 0
         # Reserve space for the optional outline guide when the option is off.
-        extent=radius
-        if key=='board_margin' and not p['outline']: extent+=p['board_margin']
-        scale=max(1,min(width,height-top)-32)/(2*extent)
+        scale,origin,extent=self.view_transform()
         def point(q):
-            return (width/2+(q[0]-p['cx'])*scale,
-                    (height+top)/2+(q[1]-p['cy'])*scale)
+            return (origin[0]+(q[0]-p['cx'])*scale,
+                    origin[1]+(q[1]-p['cy'])*scale)
         def circle(q,r):
             x,y=point(q)
             gc.DrawEllipse(x-r*scale,y-r*scale,2*r*scale,2*r*scale)
@@ -128,11 +198,26 @@ class CoilPreview(wx.Panel):
         for layer,color in (('B','#63a9ff'),('F','#ff7979')):
             gc.SetPen(wx.Pen(color,max(1,round(p['width']*scale))))
             path=gc.CreatePath()
-            for t in tracks:
+            for t in self.primitives:
                 if t['layer']!=layer: continue
                 path.MoveToPoint(*point(t['a']))
-                path.AddLineToPoint(*point(t['b']))
+                if t['kind']=='arc':
+                    center1,r,start,sweep=t['arc']
+                    x,y=point(center1)
+                    path.AddArc(x,y,r*scale,start,start+sweep,sweep>0)
+                else: path.AddLineToPoint(*point(t['b']))
+            for bridge in self.bridges:
+                if bridge['layer']!=layer: continue
+                path.MoveToPoint(*point(bridge['a']));path.AddLineToPoint(*point(bridge['b']))
             gc.StrokePath(path)
+            gc.SetBrush(wx.Brush(color))
+            for pad in self.pads:
+                if pad['layer']!=layer: continue
+                corners=geometry.pad_corners(pad)
+                path=gc.CreatePath();path.MoveToPoint(*point(corners[0]))
+                for q in corners[1:]: path.AddLineToPoint(*point(q))
+                path.CloseSubpath();gc.FillPath(path)
+            gc.SetBrush(wx.TRANSPARENT_BRUSH)
         gc.SetPen(wx.Pen('#e8c56a',1))
         gc.SetBrush(wx.Brush('#e8c56a'))
         for v in vias: circle(v['p'],p['via']/2)

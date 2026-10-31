@@ -1,0 +1,16 @@
+{
+  "name": "ktw1525 Rogowski Coil",
+  "schema_version": 2,
+  "maintainer": {
+    "name": "ktw1525",
+    "contact": {
+      "web": "https://github.com/ktw1525/KiCAD_RogowskiCoil"
+    }
+  },
+  "packages": {
+    "url": "https://raw.githubusercontent.com/ktw1525/KiCAD_RogowskiCoil/main/Publish/packages.json",
+    "sha256": "239c882b43e7d49551656e39635f36c6b0afd7a45e5fad56a76681c372ce383d",
+    "update_timestamp": 1793706538,
+    "update_time_utc": "2026-11-03 11:48:58"
+  }
+}
