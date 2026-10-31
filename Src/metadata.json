@@ -1,0 +1,33 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v2",
+  "name": "Rogowski TI Gerber Coil Generator",
+  "description": "Two independent windings recreated from TI TIDA010971E2.0 copper and NC drill geometry.",
+  "description_full": "KiCad 10 reference-accurate 32-position PCB Rogowski coil. Exact 4 alternating via rings (64 vias) + two breakout vias, GTL/GBL D132 trace centre-lines. Two separate electrical nets. Four radii, drill size, track width, rotation and center are configurable. For non-32 positions (12 to 96 multiples of 4), a trace-template-derived parametric pattern is generated without left breakout to prevent shorts. See README for limitations.",
+  "identifier": "org-openai-rogowski-coil-generator",
+  "type": "plugin",
+  "author": {
+    "name": "OpenAI",
+    "contact": {}
+  },
+  "license": "MIT",
+  "versions": [
+    {
+      "version": "0.5.0",
+      "status": "testing",
+      "kicad_version": "10.0",
+      "runtime": "swig",
+      "platforms": [
+        "windows"
+      ]
+    }
+  ],
+  "resources": {},
+  "tags": [
+    "rogowski",
+    "coil",
+    "pcb",
+    "texas-instruments",
+    "two-layer",
+    "sensor"
+  ]
+}
