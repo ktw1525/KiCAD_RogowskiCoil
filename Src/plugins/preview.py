@@ -57,7 +57,7 @@ def make_scene(settings, model):
 
 
 class CoilPreview(wx.Panel):
-    def __init__(self,parent):
+    def __init__(self,parent,on_direction_selected=None):
         super().__init__(parent)
         self.SetMinSize((300,300))
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
@@ -70,6 +70,9 @@ class CoilPreview(wx.Panel):
         self.zoom=1.0
         self.pan=(0.0,0.0)
         self.drag_position=None
+        self.direction_selection=False
+        self.direction_pointer=None
+        self.on_direction_selected=on_direction_selected
         self.model=geometry.source_model()
         self.Bind(wx.EVT_PAINT,self.on_paint)
         self.Bind(wx.EVT_SIZE,self.on_size)
@@ -79,7 +82,22 @@ class CoilPreview(wx.Panel):
         self.Bind(wx.EVT_MOTION,self.on_motion)
         self.Bind(wx.EVT_MOUSE_CAPTURE_LOST,self.on_capture_lost)
         self.Bind(wx.EVT_LEFT_DCLICK,self.reset_view)
-        self.SetToolTip('휠: 확대·축소 / 왼쪽 드래그: 이동 / 더블 클릭: 전체 보기')
+        self.SetToolTip('휠: 확대·축소 / 왼쪽 드래그: 이동 / 더블 클릭: 전체 보기\n인출 방향 선택 버튼을 누른 뒤 원하는 방향을 클릭하세요.')
+
+    def set_direction_selection(self,enabled):
+        self.end_drag()
+        self.direction_selection=bool(enabled)
+        self.direction_pointer=None
+        self.SetCursor(wx.Cursor(wx.CURSOR_CROSS) if enabled else wx.NullCursor)
+        self.Refresh()
+
+    def direction_at(self,position):
+        if self.scene is None: return None
+        _,origin,_=self.view_transform()
+        dx,dy=position[0]-origin[0],position[1]-origin[1]
+        if math.hypot(dx,dy)<self.FromDIP(12): return None
+        # Reference breakout points left. Screen/PCB Y increases downward.
+        return (math.degrees(math.atan2(dy,dx))-180.0)%360.0
 
     def view_transform(self):
         width,height=self.GetClientSize()
@@ -112,6 +130,15 @@ class CoilPreview(wx.Panel):
 
     def on_left_down(self,event):
         if self.scene is None: return
+        if self.direction_selection:
+            angle=self.direction_at(event.GetPosition())
+            if angle is None: return
+            self.set_direction_selection(False)
+            if self.on_direction_selected is not None:
+                self.on_direction_selected(angle)
+            else:
+                self.update(dict(self.settings,rotation=angle))
+            return
         self.drag_position=tuple(event.GetPosition())
         if not self.HasCapture(): self.CaptureMouse()
         self.SetCursor(wx.Cursor(wx.CURSOR_SIZING))
@@ -119,16 +146,20 @@ class CoilPreview(wx.Panel):
     def end_drag(self):
         self.drag_position=None
         if self.HasCapture(): self.ReleaseMouse()
-        self.SetCursor(wx.NullCursor)
+        self.SetCursor(wx.Cursor(wx.CURSOR_CROSS) if self.direction_selection else wx.NullCursor)
 
     def on_left_up(self,event):
         self.end_drag()
 
     def on_capture_lost(self,event):
         self.drag_position=None
-        self.SetCursor(wx.NullCursor)
+        self.SetCursor(wx.Cursor(wx.CURSOR_CROSS) if self.direction_selection else wx.NullCursor)
 
     def on_motion(self,event):
+        if self.direction_selection:
+            self.direction_pointer=tuple(event.GetPosition())
+            self.Refresh()
+            return
         if self.drag_position is None:
             event.Skip()
             return
@@ -155,7 +186,7 @@ class CoilPreview(wx.Panel):
         self.bridges=geometry.terminal_bridges(settings)
 
     def clear(self):
-        self.end_drag()
+        self.set_direction_selection(False)
         self.scene=None
         self.Refresh()
 
@@ -195,7 +226,8 @@ class CoilPreview(wx.Panel):
         if p['outline']:
             gc.SetPen(wx.Pen('#cbd5e1',1))
             circle(center,radius)
-        for layer,color in (('B','#63a9ff'),('F','#ff7979')):
+        for layer in ('B','F'):
+            color=geometry.layer_color(geometry.selected_layers(p)[layer])
             gc.SetPen(wx.Pen(color,max(1,round(p['width']*scale))))
             path=gc.CreatePath()
             for t in self.primitives:
@@ -228,6 +260,16 @@ class CoilPreview(wx.Panel):
             gc.SetPen(wx.Pen('#cbd5e1',1))
             gc.SetBrush(wx.Brush('#f1f5f9'))
             circle(center,p['hole']/2)
+        if self.direction_selection:
+            angle=self.direction_at(self.direction_pointer) if self.direction_pointer is not None else None
+            if angle is None: angle=p['rotation']
+            theta=math.radians(angle+180)
+            a=point(center);length=extent*scale
+            tip=(a[0]+length*math.cos(theta),a[1]+length*math.sin(theta))
+            gc.SetBrush(wx.TRANSPARENT_BRUSH)
+            gc.SetPen(wx.Pen('#ffe066',2,wx.PENSTYLE_SHORT_DASH))
+            path=gc.CreatePath();path.MoveToPoint(*a);path.AddLineToPoint(*tip);gc.StrokePath(path)
+            gc.SetPen(wx.Pen('#ffe066',2));gc.DrawEllipse(tip[0]-7,tip[1]-7,14,14)
         if key is None: return
         gold='#ffe066'
         gc.SetBrush(wx.TRANSPARENT_BRUSH)

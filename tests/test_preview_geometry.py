@@ -169,9 +169,73 @@ class PreviewTests(unittest.TestCase):
             self.panel.draw(dc)
         dc.SelectObject(wx.NullBitmap)
 
+    def test_pick_direction_uses_visible_center_after_zoom_and_pan(self):
+        self.panel.zoom=2.5;self.panel.pan=(71,-34)
+        self.panel.highlight('bend_radius')
+        _,origin,_=self.panel.view_transform()
+        selected=[];self.panel.on_direction_selected=selected.append
+        before=(self.panel.zoom,self.panel.pan)
+        for dx,dy,expected in ((-100,0,0),(0,-100,90),(100,0,180),(0,100,270),(100,100,225)):
+            self.panel.set_direction_selection(True)
+            event=MouseEvent(origin[0]+dx,origin[1]+dy)
+            self.panel.on_motion(event)
+            self.panel.on_left_down(event)
+            self.assertAlmostEqual(selected[-1],expected)
+            self.assertFalse(self.panel.direction_selection)
+            self.assertFalse(self.panel.HasCapture())
+            self.assertEqual((self.panel.zoom,self.panel.pan),before)
+
+    def test_direction_center_click_is_ignored_and_standalone_preview_rotates(self):
+        _,origin,_=self.panel.view_transform()
+        self.panel.set_direction_selection(True)
+        self.panel.on_left_down(MouseEvent(*origin))
+        self.assertTrue(self.panel.direction_selection)
+        self.assertEqual(self.panel.settings['rotation'],0)
+        bitmap=wx.Bitmap(700,700);dc=wx.MemoryDC(bitmap)
+        self.panel.on_motion(MouseEvent(origin[0]+100,origin[1]))
+        self.panel.draw(dc);dc.SelectObject(wx.NullBitmap)
+        self.panel.on_left_down(MouseEvent(origin[0]+100,origin[1]))
+        self.assertEqual(self.panel.settings['rotation'],180)
+        self.panel.set_direction_selection(True);self.panel.clear()
+        self.assertFalse(self.panel.direction_selection)
+        self.assertIsNone(self.panel.direction_at(origin))
+
 
 @unittest.skipIf(pcbnew is None,'Requires KiCad Python')
 class NativeBoardTests(unittest.TestCase):
+    def test_preview_direction_updates_rotation_model_and_validation(self):
+        app=wx.GetApp() or wx.App(False)
+        board=pcbnew.CreateEmptyBoard();board.SetCopperLayerCount(4)
+        dialog=action.Parameters(None,4,board)
+        try:
+            dialog.center_hole.SetValue(False)
+            dialog.layer_entries['layer_f'].SetStringSelection('In1.Cu')
+            dialog.layer_entries['layer_b'].SetStringSelection('In2.Cu')
+            dialog.preview.SetSize((600,600));dialog.update_preview()
+            p=dialog.get_values();old=geometry.build(p)
+            dialog.validated_values=dict(p);dialog.validated_geometry=old;dialog.generate_button.Enable()
+            dialog.preview.zoom=1.8;dialog.preview.pan=(25,-12)
+            view=(dialog.preview.zoom,dialog.preview.pan)
+            dialog.direction_button.SetValue(True);dialog.toggle_direction_selection()
+            _,origin,_=dialog.preview.view_transform()
+            dialog.preview.on_left_down(MouseEvent(origin[0],origin[1]-120))
+            chosen=dialog.get_values()
+            self.assertEqual(chosen,dict(p,rotation=90))
+            self.assertIsNone(dialog.validated_geometry)
+            self.assertFalse(dialog.generate_button.IsEnabled())
+            self.assertFalse(dialog.direction_button.GetValue())
+            self.assertEqual((dialog.preview.zoom,dialog.preview.pan),view)
+            model=geometry.build(chosen)
+            self.assertEqual(dialog.preview.scene[0],model['tracks'])
+            self.assertEqual(dialog.preview.scene[1],model['vias'])
+            action.apply_geometry(board,model)
+            vias={v.m_Uuid.AsString():v for v in board.GetTracks() if isinstance(v,pcbnew.PCB_VIA)}
+            actual={(v.GetPosition().x,v.GetPosition().y) for v in vias.values()}
+            self.assertEqual(actual,{(action.vec(v['p']).x,action.vec(v['p']).y) for v in model['vias']})
+            self.assertIn('0.6.2',dialog.GetTitle())
+        finally:
+            dialog.preview_timer.Stop();dialog.Destroy();app.Yield()
+
     def test_native_arcs_pads_and_save_reload(self):
         for n,scale,rotation,radius in ((32,1,0,0.385),(24,1,37,0.385),
                                        (40,1.5,37,0.385),(32,1,23,0)):
@@ -292,6 +356,87 @@ class NativeBoardTests(unittest.TestCase):
             self.assertIsNone(dialog.validated_geometry)
             dialog.net_entries['net_b'].SetValue(' ')
             with self.assertRaises(ValueError):dialog.get_values()
+        finally:
+            dialog.preview_timer.Stop();dialog.Destroy();app.Yield()
+
+
+    def test_selected_layers_rectangles_and_vias_survive_reload(self):
+        cases=((4,'In1.Cu','In2.Cu',pcbnew.VIATYPE_BURIED),
+               (4,'F.Cu','In1.Cu',pcbnew.VIATYPE_BLIND),
+               (4,'In2.Cu','B.Cu',pcbnew.VIATYPE_BLIND),
+               (2,'B.Cu','F.Cu',pcbnew.VIATYPE_THROUGH),
+               (6,'In2.Cu','In4.Cu',pcbnew.VIATYPE_BURIED))
+        for count,first,second,via_type in cases:
+            with self.subTest(layers=(first,second)):
+                board=pcbnew.CreateEmptyBoard();board.SetCopperLayerCount(count)
+                g=geometry.build(dict(geometry.DEFAULTS,center_hole=True,rotation=37,
+                                      layer_f=first,layer_b=second))
+                action.apply_geometry(board,g)
+                with tempfile.TemporaryDirectory() as directory:
+                    filename=str(Path(directory)/'layers.kicad_pcb')
+                    self.assertTrue(pcbnew.SaveBoard(filename,board,True))
+                    loaded=pcbnew.LoadBoard(filename)
+                    mapping={key:getattr(pcbnew,name.replace('.','_')) for key,name in (('F',first),('B',second))}
+                    tracks=list(loaded.GetTracks())
+                    vias=[t for t in tracks if isinstance(t,pcbnew.PCB_VIA)]
+                    self.assertEqual(len(vias),len(g['vias']))
+                    stack=geometry.copper_layers(count)
+                    ends=sorted((first,second),key=stack.index)
+                    for via in vias:
+                        self.assertEqual(via.GetViaType(),via_type)
+                        self.assertEqual(via.TopLayer(),getattr(pcbnew,ends[0].replace('.','_')))
+                        self.assertEqual(via.BottomLayer(),getattr(pcbnew,ends[1].replace('.','_')))
+                    self.assertEqual({t.GetLayer() for t in tracks if not isinstance(t,pcbnew.PCB_VIA)},set(mapping.values()))
+                    fps=list(loaded.GetFootprints())
+                    pads=[pad for fp in fps for pad in fp.Pads()]
+                    rectangles=[shape for shape in loaded.GetDrawings() if shape.GetShape()==pcbnew.SHAPE_T_POLY]
+                    expected_inner=sum(spec['kind']=='rectangle' for spec in g['pads'])
+                    self.assertEqual(len(rectangles),expected_inner)
+                    self.assertEqual(len(pads),4-expected_inner)
+                    for spec in g['pads']:
+                        layer=mapping[spec['layer']]
+                        if spec['kind']=='pad':
+                            obj=next(pad for pad in pads if pad.GetNumber()==spec['number'])
+                            self.assertTrue(obj.IsOnLayer(layer))
+                            self.assertFalse(obj.IsOnLayer(pcbnew.B_Mask if layer==pcbnew.F_Cu else pcbnew.F_Mask))
+                        else:
+                            corners=geometry.pad_corners(spec)
+                            x=min(q[0] for q in corners);y=min(q[1] for q in corners)
+                            found=[r for r in rectangles if r.GetLayer()==layer and
+                                   abs(pcbnew.ToMM(r.GetBoundingBox().GetX())-x)<0.000003 and
+                                   abs(pcbnew.ToMM(r.GetBoundingBox().GetY())-y)<0.000003]
+                            self.assertEqual(len(found),1)
+                            self.assertTrue(found[0].IsSolidFill())
+                            self.assertTrue(found[0].IsConnected())
+                            self.assertEqual(found[0].GetWidth(),0)
+                            self.assertEqual(found[0].GetNetname(),g['settings']['net_a' if spec['net']=='A' else 'net_b'])
+                    bridge=[shape for fp in fps for shape in fp.GraphicalItems() if shape.GetShape()==pcbnew.SHAPE_T_SEGMENT]
+                    bridge.extend(t for t in tracks if not isinstance(t,pcbnew.PCB_VIA) and
+                                  t.GetStart()==action.vec(g['bridges'][0]['a']) and t.GetEnd()==action.vec(g['bridges'][0]['b']))
+                    self.assertEqual(len(bridge),1)
+                    self.assertEqual(bridge[0].GetLayer(),mapping['B'])
+                    self.assertEqual(bridge[0].GetStart(),action.vec(g['bridges'][0]['a']))
+                    self.assertEqual(bridge[0].GetEnd(),action.vec(g['bridges'][0]['b']))
+
+    def test_layer_selection_rejects_same_or_unavailable_layers(self):
+        app=wx.GetApp() or wx.App(False)
+        board=pcbnew.CreateEmptyBoard();board.SetCopperLayerCount(4)
+        dialog=action.Parameters(None,4,board)
+        try:
+            self.assertEqual(dialog.layer_entries['layer_f'].GetStrings(),['F.Cu','In1.Cu','In2.Cu','B.Cu'])
+            dialog.layer_entries['layer_f'].SetStringSelection('In1.Cu')
+            dialog.layer_entries['layer_b'].SetStringSelection('In2.Cu')
+            p=dialog.get_values();g=geometry.build(p)
+            dialog.validated_values=dict(p);dialog.validated_geometry=g
+            dialog.layer_entries['layer_b'].SetStringSelection('B.Cu')
+            with self.assertRaises(ValueError):dialog.get_validated_geometry()
+            dialog.layer_entries['layer_b'].SetStringSelection('In1.Cu')
+            with self.assertRaises(ValueError):dialog.get_values()
+            with self.assertRaises(ValueError):geometry.build(dict(p,layer_b='In1.Cu'))
+            board.SetCopperLayerCount(2)
+            with self.assertRaises(ValueError):action.apply_geometry(board,g)
+            self.assertEqual(len(list(board.GetTracks())),0)
+            self.assertEqual(len(list(board.GetFootprints())),0)
         finally:
             dialog.preview_timer.Stop();dialog.Destroy();app.Yield()
 

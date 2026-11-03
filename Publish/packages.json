@@ -4,7 +4,7 @@
       "$schema": "https://go.kicad.org/pcm/schemas/v2",
       "name": "Rogowski TI Gerber Coil Generator",
       "description": "TI Gerber-derived dual-winding Rogowski coil with selectable terminal nets and a bottom series link.",
-      "description_full": "KiCad 10 dual-winding PCB Rogowski coil using TI reference Top/Bottom trace templates. The 32-position mode has 66 vias; variable counts have 2N+2 vias. Curves are native PCB_ARC tracks, including common-radius 180/90 degree bends. Four SMD pads form aligned front/back pairs. Choose existing PCB nets or enter new names for front pads 1 and 2; those nets also apply to their windings and bottom pads 3 and 4 respectively. Bottom pads 3 and 4 are joined by a copper segment in a dedicated net-tie footprint. Generated items are grouped and the PCB editor focuses on the coil after completion. Dimension and copper-overlap validation is required before generation. Live preview supports wheel zoom, left-button pan and parameter highlighting. See README for limitations.",
+      "description_full": "KiCad 10 dual-winding Rogowski coil using TI reference trace templates. Select two enabled copper layers; default F.Cu/B.Cu. Curves are native PCB_ARC tracks. Vias span the selected pair as through, blind or buried vias. Terminals on outer layers are SMD pads; terminals on inner layers are filled copper square graphics without pads or mask openings. Choose existing PCB nets or enter new names for terminals 1 and 2. Terminals 3 and 4 are intentionally joined on the second selected layer; no separate net inputs are provided. Outer-layer links use a net-tie footprint. Inner-layer copper graphics may produce DRC contact/short reports and need review. Generated items are grouped and focused after completion. Live preview supports wheel zoom, pan and parameter highlighting. See README for limitations.",
       "identifier": "org-ktw1525-rogowski-coil-generator",
       "type": "plugin",
       "author": {
@@ -16,7 +16,7 @@
       "license": "MIT",
       "versions": [
         {
-          "version": "0.6.1",
+          "version": "0.6.2",
           "status": "testing",
           "kicad_version": "10.0",
           "runtime": "swig",
@@ -24,9 +24,9 @@
             "windows"
           ],
           "download_url": "https://raw.githubusercontent.com/ktw1525/KiCAD_RogowskiCoil/main/Publish/Rogowski_TI_Gerber_PCM_KiCad10.zip",
-          "download_sha256": "d741d831a15d0ca9f6dba4f2f95dc3036d7e0fa57c6dd2f696464ab39f11b29d",
-          "download_size": 52691,
-          "install_size": 144340
+          "download_sha256": "78945d612b39111a98a839c438633125c76c5d2b9f4bfec41f03b195bf51255e",
+          "download_size": 55546,
+          "install_size": 155390
         }
       ],
       "resources": {},

@@ -15,7 +15,23 @@ DEFAULTS = dict(cx=100.0,cy=100.0,turns=32,hole=3.0,
                 ri1=2.235,ri2=2.90185,ro1=4.880,ro2=5.265,
                 width=0.100, via=0.450, drill=0.200, rotation=0.0,
                 clearance=0.10, outline=False, board_margin=0.9,
-                bend_radius=0.385,net_a='ROGOWSKI_A',net_b='ROGOWSKI_B')
+                bend_radius=0.385,net_a='ROGOWSKI_A',net_b='ROGOWSKI_B',
+                layer_f='F.Cu',layer_b='B.Cu')
+
+
+def copper_layers(count):
+    return ['F.Cu']+['In%d.Cu'%i for i in range(1,count-1)]+['B.Cu']
+
+
+def selected_layers(p):
+    return {'F':p.get('layer_f','F.Cu'),'B':p.get('layer_b','B.Cu')}
+
+
+def layer_color(name):
+    if name=='F.Cu': return '#ff7979'
+    if name=='B.Cu': return '#63a9ff'
+    colors=('#83c575','#db992e','#d55de6','#59c7c7')
+    return colors[(int(name[2:-3])-1)%len(colors)]
 
 def source_model():
     with open(os.path.join(os.path.dirname(__file__), 'coil_model.json'),
@@ -503,7 +519,9 @@ def breakout_pads(p):
     pads=[]
     for index,(net,source) in enumerate((('A',(-6.905,0.1416)),('B',(-6.905,0.9916)))):
         for layer in ('F','B'):
+            target=selected_layers(p)[layer]
             pads.append(dict(p=_breakout_point(source,p),size=size,rotation=p['rotation'],
+                             copper_layer=target,kind='pad' if target in ('F.Cu','B.Cu') else 'rectangle',
                              net=net,layer=layer,number=str(index+1+(2 if layer=='B' else 0))))
     return pads
 
@@ -600,6 +618,9 @@ def parameter_limits(p):
     return result
 
 def validate(p):
+    layers=selected_layers(p)
+    if any(name not in copper_layers(64) for name in layers.values()) or layers['F']==layers['B']:
+        raise ValueError('서로 다른 두 구리 레이어를 선택하세요.')
     for key in ('net_a','net_b'):
         name=p.get(key,DEFAULTS[key])
         if not isinstance(name,str) or not name.strip() or any(c in name for c in '\r\n\x00'):
